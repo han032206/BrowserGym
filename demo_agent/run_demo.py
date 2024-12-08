@@ -1,11 +1,11 @@
 import argparse
 import gymnasium as gym
 
+# locally defined agent
+from agent import DemoAgentArgs
+
 # browsergym experiments utils
 from browsergym.experiments import EnvArgs, ExpArgs, get_exp_result
-
-# locally defined agent
-from basic_agent import DemoAgentArgs
 
 
 def str2bool(v):

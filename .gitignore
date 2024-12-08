@@ -138,9 +138,15 @@ error_logs.txt
 # tests
 tests/results
 tmp.py
-.vscode/settings.json
+.vscode/**
 
-# webcanvas
-test_gpt.py
-temp_test.py
+# demo and results
 results/
+
+.vscode/launch.json
+
+# assistantbench
+tests/assistantbench/assistantbench-predictions-test.jsonl
+
+# weblinx
+bg_wl_data/

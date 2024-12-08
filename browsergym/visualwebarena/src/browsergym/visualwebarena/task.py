@@ -1,12 +1,14 @@
+import importlib.resources
 import json
 import logging
-import playwright.sync_api
-import importlib.resources
 import pathlib
 import tempfile
-import requests
+import urllib.parse
+from typing import Literal, Optional, Tuple
 
-from typing import Optional, Tuple
+import playwright.sync_api
+import requests
+import torch
 
 from browsergym.core.task import AbstractBrowserTask
 
@@ -100,6 +102,7 @@ class GenericVisualWebArenaTask(AbstractBrowserTask):
         task_id: Optional[int] = None,
         intent_template_id: Optional[int] = None,
         with_na_hint: bool = False,
+        eval_captioning_model_device: Literal["cpu", "cuda"] = "cpu",
     ) -> None:
         super().__init__(seed)
 
@@ -111,6 +114,7 @@ class GenericVisualWebArenaTask(AbstractBrowserTask):
         self.webarena_instance = VisualWebArenaInstance()
         self.config_file: str = None
         self.with_na_hint = with_na_hint
+        self.eval_captioning_model_device = eval_captioning_model_device
 
         # one and only one of task id and template id must be provided
         if (task_id is None) == (intent_template_id is None):
@@ -160,6 +164,7 @@ class GenericVisualWebArenaTask(AbstractBrowserTask):
     def setup(self, page: playwright.sync_api.Page) -> tuple[str, dict]:
         # import webarena on instanciation
         from visualwebarena.evaluation_harness.evaluators import evaluator_router
+        from visualwebarena.evaluation_harness.image_utils import get_captioning_fn
 
         # pick a task at random
         self.config = self.random.choice(self.task_configs)
@@ -171,7 +176,27 @@ class GenericVisualWebArenaTask(AbstractBrowserTask):
             self.config_file = f.name
 
         # build the evaluator
-        self.evaluator = evaluator_router(self.config_file)
+        from transformers.utils.logging import (
+            disable_progress_bar,
+            enable_progress_bar,
+            is_progress_bar_enabled,
+        )
+
+        hide_progress_bar = is_progress_bar_enabled()
+        if hide_progress_bar:
+            disable_progress_bar()
+        captioning_fn = get_captioning_fn(
+            device=self.eval_captioning_model_device,
+            dtype=(
+                torch.float16
+                if (self.eval_captioning_model_device == "cuda" and torch.cuda.is_available())
+                else torch.float32
+            ),
+            model_name="Salesforce/blip2-flan-t5-xl",
+        )
+        if hide_progress_bar:
+            enable_progress_bar()
+        self.evaluator = evaluator_router(self.config_file, captioning_fn=captioning_fn)
 
         # reset instance if needed (classifieds domain only)
         if self.config.get("require_reset", False):
@@ -226,7 +251,18 @@ class GenericVisualWebArenaTask(AbstractBrowserTask):
     def validate(
         self, page: playwright.sync_api.Page, chat_messages: list[str]
     ) -> Tuple[float, bool, str, dict]:
-        # import webarena on instanciation
+
+        # safeguard: check that all open tabs are either blank or within the list of WebArena URLs
+        authorized_locations = ["newtab", ""] + [
+            urllib.parse.urlparse(url).netloc
+            for url in [*self.webarena_instance.urls.values(), self.webarena_instance.home_url]
+        ]
+        for open_page in page.context.pages:
+            page_location = urllib.parse.urlparse(open_page.url).netloc
+            if not page_location in authorized_locations:
+                return 0, True, "", {"error": "Unauthorized url, terminating task"}
+
+        # import webarena dynamically
         from visualwebarena.browser_env.actions import ActionTypes
 
         # if any, use the last assistant message as the stop answer for webarena
@@ -250,8 +286,8 @@ class GenericVisualWebArenaTask(AbstractBrowserTask):
                 page=page,  # none of webarena's evaluators requires a cdp session
             )
         # llm_fuzzy_match() bugfix (assert "correct" in response)
-        except AssertionError as e:
-            logger.info(
+        except AssertionError:
+            logger.debug(
                 "llm_fuzzy_match() bugfix applied: AssertionError in evaluator, using score = 0.0"
             )
             score = 0.0
